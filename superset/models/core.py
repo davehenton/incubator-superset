@@ -30,6 +30,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm.session import make_transient
+from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import text
 from sqlalchemy.sql.expression import TextAsFrom
 from sqlalchemy_utils import EncryptedType
@@ -321,6 +322,14 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
 
     @property
     def url(self):
+        if self.json_metadata:
+            # add default_filters to the preselect_filters of dashboard
+            json_metadata = json.loads(self.json_metadata)
+            default_filters = json_metadata.get('default_filters')
+            if default_filters:
+                filters = parse.quote(default_filters.encode('utf8'))
+                return "/superset/dashboard/{}/?preselect_filters={}".format(
+                    self.slug or self.id, filters)
         return "/superset/dashboard/{}/".format(self.slug or self.id)
 
     @property
@@ -410,6 +419,7 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
         slices = copy(dashboard_to_import.slices)
         old_to_new_slc_id_dict = {}
         new_filter_immune_slices = []
+        new_timed_refresh_immune_slices = []
         new_expanded_slices = {}
         i_params_dict = dashboard_to_import.params_dict
         for slc in slices:
@@ -423,6 +433,10 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
             if ('filter_immune_slices' in i_params_dict and
                     old_slc_id_str in i_params_dict['filter_immune_slices']):
                 new_filter_immune_slices.append(new_slc_id_str)
+            if ('timed_refresh_immune_slices' in i_params_dict and
+                    old_slc_id_str in
+                        i_params_dict['timed_refresh_immune_slices']):
+                new_timed_refresh_immune_slices.append(new_slc_id_str)
             if ('expanded_slices' in i_params_dict and
                     old_slc_id_str in i_params_dict['expanded_slices']):
                 new_expanded_slices[new_slc_id_str] = (
@@ -445,6 +459,9 @@ class Dashboard(Model, AuditMixinNullable, ImportMixin):
         if new_filter_immune_slices:
             dashboard_to_import.alter_params(
                 filter_immune_slices=new_filter_immune_slices)
+        if new_timed_refresh_immune_slices:
+            dashboard_to_import.alter_params(
+                timed_refresh_immune_slices=new_timed_refresh_immune_slices)
 
         new_slices = session.query(Slice).filter(
             Slice.id.in_(old_to_new_slc_id_dict.values())).all()
@@ -560,10 +577,12 @@ class Database(Model, AuditMixinNullable):
         conn.password = password_mask if conn.password else None
         self.sqlalchemy_uri = str(conn)  # hides the password
 
-    def get_sqla_engine(self, schema=None):
+    def get_sqla_engine(self, schema=None, nullpool=False):
         extra = self.get_extra()
         uri = make_url(self.sqlalchemy_uri_decrypted)
         params = extra.get('engine_params', {})
+        if nullpool:
+            params['poolclass'] = NullPool
         uri = self.db_engine_spec.adjust_database_uri(uri, schema)
         return create_engine(uri, **params)
 
